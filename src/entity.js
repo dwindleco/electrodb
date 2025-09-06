@@ -536,6 +536,9 @@ class Entity {
     let results = [];
     let concurrent = this._normalizeConcurrencyValue(config.concurrent);
     let concurrentOperations = u.batchItems(parameters, concurrent);
+    let retryAttempts = 0;
+    let maxRetries = this._normalizeAutoretryValue(config.autoretry);
+    
     for (let operation of concurrentOperations) {
       await Promise.all(
         operation.map(async (params) => {
@@ -562,7 +565,13 @@ class Entity {
       );
     }
 
-    return { unprocessed: results };
+    // Handle autoretry for unprocessed items
+    if (maxRetries > 0 && results.length > 0) {
+      const { unprocessed: finalUnprocessed, retryAttempts: totalRetryAttempts } = await this._retryBulkWrite(results, config, maxRetries);
+      return { unprocessed: finalUnprocessed, retryAttempts: totalRetryAttempts };
+    }
+
+    return { unprocessed: results, retryAttempts };
   }
 
   _createNewBatchGetOrderMaintainer(config = {}) {
@@ -611,6 +620,9 @@ class Entity {
       ? new Array(orderMaintainer.getSize()).fill(null)
       : [];
     let unprocessedAll = [];
+    let retryAttempts = 0;
+    let maxRetries = this._normalizeAutoretryValue(config.autoretry);
+    
     for (let operation of concurrentOperations) {
       await Promise.all(
         operation.map(async (params) => {
@@ -629,7 +641,25 @@ class Entity {
         }),
       );
     }
-    return { data: resultsAll, unprocessed: unprocessedAll };
+
+    // Handle autoretry for unprocessed items
+    if (maxRetries > 0 && unprocessedAll.length > 0) {
+      const { data: retryData, unprocessed: finalUnprocessed, retryAttempts: totalRetryAttempts } = await this._retryBulkGet(unprocessedAll, config, maxRetries);
+      // Merge retry results with initial results
+      if (config.preserveBatchOrder) {
+        // For ordered results, we need to merge carefully
+        retryData.forEach(item => {
+          if (item !== null) {
+            resultsAll.push(item);
+          }
+        });
+      } else {
+        resultsAll.push(...retryData);
+      }
+      return { data: resultsAll, unprocessed: finalUnprocessed, retryAttempts: totalRetryAttempts };
+    }
+
+    return { data: resultsAll, unprocessed: unprocessedAll, retryAttempts };
   }
 
   async hydrate(index, keys = [], config) {
@@ -1410,6 +1440,14 @@ class Entity {
     return value;
   }
 
+  _normalizeAutoretryValue(autoretry) {
+    if (typeof autoretry === "number" && autoretry >= 0 && Number.isInteger(autoretry)) {
+      return autoretry;
+    } else {
+      return 0;
+    }
+  }
+
   _normalizePagesValue(value) {
     if (value === AllPages) {
       return value;
@@ -1647,6 +1685,7 @@ class Entity {
       hydrator: (_entity, _indexName, items) => items,
       _objectOnEmpty: false,
       _includeOnResponseItem: {},
+      autoretry: undefined,
     };
 
     return provided.filter(Boolean).reduce((config, option) => {
@@ -1886,6 +1925,10 @@ class Entity {
           ...config._includeOnResponseItem,
           ...option._includeOnResponseItem,
         };
+      }
+
+      if (option.autoretry !== undefined) {
+        config.autoretry = option.autoretry;
       }
 
       config.page = Object.assign({}, config.page, option.page);
@@ -4920,6 +4963,204 @@ class Entity {
       },
       original: model,
     };
+  }
+
+  async _retryBulkWrite(unprocessedItems, config, maxRetries) {
+    let currentUnprocessed = unprocessedItems;
+    let retryAttempts = 0;
+
+    while (retryAttempts < maxRetries && currentUnprocessed.length > 0) {
+      retryAttempts++;
+      
+      // Create new batch operations for unprocessed items
+      const putItems = [];
+      const deleteItems = [];
+      
+      for (let item of currentUnprocessed) {
+        // Check if this is a delete or put operation
+        // Delete operations only have key composite attributes
+        const keyAttributes = this._getKeyCompositeAttributes();
+        const itemKeys = Object.keys(item).filter(key => 
+          key !== this.identifiers.entity && key !== this.identifiers.version
+        );
+        
+        // Check if item only has key attributes (and optionally entity/version identifiers)
+        const hasOnlyKeys = itemKeys.every(key => keyAttributes.includes(key)) && 
+                           itemKeys.length === keyAttributes.length;
+        
+        if (hasOnlyKeys) {
+          deleteItems.push(item);
+        } else {
+          putItems.push(item);
+        }
+      }
+      
+      const retryResults = [];
+      
+      // Execute put operations
+      if (putItems.length > 0) {
+        const putResponse = await this.put(putItems).go({
+          ...config,
+          autoretry: 0 // Prevent infinite recursion
+        });
+        if (putResponse.unprocessed) {
+          retryResults.push(...putResponse.unprocessed);
+        }
+      }
+      
+      // Execute delete operations  
+      if (deleteItems.length > 0) {
+        const deleteResponse = await this.delete(deleteItems).go({
+          ...config,
+          autoretry: 0 // Prevent infinite recursion
+        });
+        if (deleteResponse.unprocessed) {
+          retryResults.push(...deleteResponse.unprocessed);
+        }
+      }
+      
+      currentUnprocessed = retryResults;
+    }
+
+    return { unprocessed: currentUnprocessed, retryAttempts };
+  }
+
+  async _retryBulkGet(unprocessedItems, config, maxRetries) {
+    let currentUnprocessed = unprocessedItems;
+    let retryAttempts = 0;
+    let allRetryData = [];
+
+    while (retryAttempts < maxRetries && currentUnprocessed.length > 0) {
+      retryAttempts++;
+      
+      // Use the existing get method to retry unprocessed items
+      const retryResponse = await this.get(currentUnprocessed).go({
+        ...config,
+        autoretry: 0 // Prevent infinite recursion
+      });
+      
+      // Accumulate successful results
+      allRetryData.push(...retryResponse.data);
+      currentUnprocessed = retryResponse.unprocessed;
+    }
+
+    return { data: allRetryData, unprocessed: currentUnprocessed, retryAttempts };
+  }
+
+  _convertUnprocessedToWriteParams(unprocessedItems, config) {
+    // For batch write, unprocessed items are in entity format
+    // We need to convert them back to batch write parameters
+    const table = config.table || this.getTableName();
+    const putItems = [];
+    const deleteItems = [];
+    
+    for (let item of unprocessedItems) {
+      // Determine if this is a put or delete based on the item structure
+      // If the item has attributes beyond just keys, it's a put operation
+      const keys = this._getTableIndexKeys();
+      const hasOnlyKeys = Object.keys(item).every(key => 
+        keys.includes(key) || key === this.identifiers.entity || key === this.identifiers.version
+      );
+      
+      if (hasOnlyKeys) {
+        // This is a delete operation - only has keys
+        deleteItems.push(item);
+      } else {
+        // This is a put operation - has full item
+        putItems.push(item);
+      }
+    }
+    
+    const requests = [];
+    
+    // Add put requests
+    if (putItems.length > 0) {
+      for (let item of putItems) {
+        requests.push({
+          PutRequest: {
+            Item: this._formatItemForDynamoDB(item)
+          }
+        });
+      }
+    }
+    
+    // Add delete requests  
+    if (deleteItems.length > 0) {
+      for (let item of deleteItems) {
+        requests.push({
+          DeleteRequest: {
+            Key: this._formatKeysForDynamoDB(item)
+          }
+        });
+      }
+    }
+    
+    // Batch requests according to DynamoDB limits
+    const batches = u.batchItems(requests, MaxBatchItems[MethodTypes.batchWrite]);
+    return batches.map(batch => ({
+      RequestItems: {
+        [table]: batch
+      }
+    }));
+  }
+
+  _convertUnprocessedToGetParams(unprocessedItems, config) {
+    // For batch get, unprocessed items are key objects
+    const table = config.table || this.getTableName();
+    const keys = unprocessedItems.map(item => this._formatKeysForDynamoDB(item));
+    
+    // Batch keys according to DynamoDB limits
+    const batches = u.batchItems(keys, MaxBatchItems[MethodTypes.batchGet]);
+    return batches.map(batch => ({
+      RequestItems: {
+        [table]: {
+          Keys: batch
+        }
+      }
+    }));
+  }
+
+  _getTableIndexKeys() {
+    const { pk, sk } = this.model.prefixes[TableIndex];
+    const keys = [pk.field];
+    if (this.model.lookup.indexHasSortKeys[TableIndex]) {
+      keys.push(sk.field);
+    }
+    return keys;
+  }
+
+  _getKeyCompositeAttributes() {
+    // Get the composite attributes that make up the primary key from facets
+    const attributes = [];
+    
+    if (this.model.facets && this.model.facets.attributes) {
+      // Extract attribute names for pk and sk types
+      for (let facetAttr of this.model.facets.attributes) {
+        if (facetAttr.index === TableIndex && (facetAttr.type === 'pk' || facetAttr.type === 'sk')) {
+          attributes.push(facetAttr.name);
+        }
+      }
+    }
+    
+    return attributes;
+  }
+
+  _formatItemForDynamoDB(item) {
+    // This method converts an entity item back to DynamoDB format
+    // For now, we'll assume the item is already in correct format from unprocessed response
+    return item;
+  }
+
+  _formatKeysForDynamoDB(item) {
+    // Extract just the key attributes from an item
+    const keys = this._getTableIndexKeys();
+    const keyObj = {};
+    for (let key of keys) {
+      if (item[key] !== undefined) {
+        keyObj[key] = item[key];
+      }
+    }
+    return keyObj;
   }
 }
 
