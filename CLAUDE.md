@@ -90,6 +90,24 @@ The project uses Docker Compose to run a local DynamoDB instance for development
 
 This setup is required before running any tests that interact with DynamoDB.
 
+### Batch Operations AutoRetry Feature
+
+ElectroDB includes an `autoretry` feature for batch operations that automatically retries unprocessed items:
+
+**Configuration Options**:
+- `autoretry: number` - Number of retry attempts (0 = no retry, default)
+- `retryDelay: number` - Base delay in milliseconds for exponential backoff (default: 100ms)
+
+**Retry Behavior**:
+- Uses exponential backoff with jitter: `baseDelay * 2^(attempt-1) + randomJitter`
+- Delays are capped at 30 seconds maximum
+- Continues until all items processed or max retries reached
+- Works with batchGet, batchPut, and batchDelete operations
+
+**Response Format**:
+- Maintains existing response structure: `{data: [], unprocessed: []}`
+- Adds `retryAttempts: number` field indicating actual retry attempts made
+
 ### Test Structure
 Tests are organized in the `test/` directory with:
 - `*.spec.*` files for unit tests run by Mocha

@@ -1448,6 +1448,24 @@ class Entity {
     }
   }
 
+  _normalizeRetryDelayValue(retryDelay) {
+    if (typeof retryDelay === "number" && retryDelay >= 0) {
+      return retryDelay;
+    } else {
+      return 100; // Default 100ms base delay
+    }
+  }
+
+  async _exponentialBackoffDelay(retryAttempt, baseDelay) {
+    // Exponential backoff: baseDelay * 2^(retryAttempt-1)
+    // With jitter to prevent thundering herd
+    const delay = baseDelay * Math.pow(2, retryAttempt - 1);
+    const jitter = Math.random() * 0.1 * delay; // Add up to 10% jitter
+    const finalDelay = Math.min(delay + jitter, 30000); // Cap at 30 seconds
+    
+    return new Promise(resolve => setTimeout(resolve, finalDelay));
+  }
+
   _normalizePagesValue(value) {
     if (value === AllPages) {
       return value;
@@ -1686,6 +1704,7 @@ class Entity {
       _objectOnEmpty: false,
       _includeOnResponseItem: {},
       autoretry: undefined,
+      retryDelay: undefined,
     };
 
     return provided.filter(Boolean).reduce((config, option) => {
@@ -1929,6 +1948,10 @@ class Entity {
 
       if (option.autoretry !== undefined) {
         config.autoretry = option.autoretry;
+      }
+
+      if (option.retryDelay !== undefined) {
+        config.retryDelay = option.retryDelay;
       }
 
       config.page = Object.assign({}, config.page, option.page);
@@ -4968,9 +4991,13 @@ class Entity {
   async _retryBulkWrite(unprocessedItems, config, maxRetries) {
     let currentUnprocessed = unprocessedItems;
     let retryAttempts = 0;
+    const baseDelay = this._normalizeRetryDelayValue(config.retryDelay);
 
     while (retryAttempts < maxRetries && currentUnprocessed.length > 0) {
       retryAttempts++;
+      
+      // Apply exponential backoff delay before retry
+      await this._exponentialBackoffDelay(retryAttempts, baseDelay);
       
       // Create new batch operations for unprocessed items
       const putItems = [];
@@ -5029,9 +5056,13 @@ class Entity {
     let currentUnprocessed = unprocessedItems;
     let retryAttempts = 0;
     let allRetryData = [];
+    const baseDelay = this._normalizeRetryDelayValue(config.retryDelay);
 
     while (retryAttempts < maxRetries && currentUnprocessed.length > 0) {
       retryAttempts++;
+      
+      // Apply exponential backoff delay before retry
+      await this._exponentialBackoffDelay(retryAttempts, baseDelay);
       
       // Use the existing get method to retry unprocessed items
       const retryResponse = await this.get(currentUnprocessed).go({
