@@ -1172,6 +1172,7 @@ export type BatchWriteResponse<E extends Entity<any, any, any, any>> =
   E extends Entity<infer A, infer F, infer C, infer S>
     ? {
         unprocessed: AllTableIndexCompositeAttributes<A, F, C, S>[];
+        retryAttempts?: number;
       }
     : never;
 
@@ -1180,6 +1181,7 @@ export type BatchGetResponse<E extends Entity<any, any, any, any>> =
     ? {
         data: EntityItem<E>[];
         unprocessed: AllTableIndexCompositeAttributes<A, F, C, S>[];
+        retryAttempts?: number;
       }
     : never;
 
@@ -2597,6 +2599,8 @@ export interface BulkOptions extends QueryOptions {
   unprocessed?: "raw" | "item";
   concurrency?: number;
   preserveBatchOrder?: boolean;
+  autoretry?: number;
+  retryDelay?: number;
 }
 
 export type OptionalDefaultEntityIdentifiers = {
@@ -2731,6 +2735,7 @@ type GoBatchGetTerminal<
             unprocessed: Array<
               Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>
             >;
+            retryAttempts?: number;
           }>
       : Promise<{
           data: Array<
@@ -2743,6 +2748,7 @@ type GoBatchGetTerminal<
           unprocessed: Array<
             Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>
           >;
+          retryAttempts?: number;
         }>
     : Promise<{
         data: Array<
@@ -2755,6 +2761,7 @@ type GoBatchGetTerminal<
         unprocessed: Array<
           Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>
         >;
+        retryAttempts?: number;
       }>
   : "preserveBatchOrder" extends keyof Options
     ? Options["preserveBatchOrder"] extends true
@@ -2763,16 +2770,19 @@ type GoBatchGetTerminal<
           unprocessed: Array<
             Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>
           >;
+          retryAttempts?: number;
         }>
       : Promise<{
           data: Array<Resolve<ResponseItem>>;
           unprocessed: Array<
             Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>
           >;
+          retryAttempts?: number;
         }>
     : Promise<{
         data: Array<Resolve<ResponseItem>>;
         unprocessed: Array<Resolve<AllTableIndexCompositeAttributes<A, F, C, S>>>;
+        retryAttempts?: number;
       }>;
 
 type GoGetTerminal<
@@ -2929,7 +2939,7 @@ export type DeleteRecordOperationGo<ResponseType, Keys> = <
 
 export type BatchWriteGo<ResponseType> = <O extends BulkOptions>(
   options?: O,
-) => Promise<{ unprocessed: ResponseType }>;
+) => Promise<{ unprocessed: ResponseType; retryAttempts?: number }>;
 
 export type ParamRecord<Options = ParamOptions> = <P = Record<string, any>>(
   options?: Options,

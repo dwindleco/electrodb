@@ -275,6 +275,7 @@ expectType<Promise<{
     attr1: string;
     attr2: string;
   }[];
+  retryAttempts?: number;
 }>>(batchGetWithoutAttributesNoPreserve);
 
 const batchGetWithoutAttributesPreserve = entityWithSK.get([{attr1: 'abc', attr2: 'def'}]).go({ preserveBatchOrder: true });
@@ -296,6 +297,7 @@ expectType<Promise<{
     attr1: string;
     attr2: string;
   }[];
+  retryAttempts?: number;
 }>>(batchGetWithoutAttributesPreserve);
 
 const batchGetWithAttributesNoPreserve = entityWithSK.get([{attr1: 'abc', attr2: 'def'}]).go({ attributes: ['attr5', 'attr10'] });
@@ -305,6 +307,7 @@ expectType<Promise<{
     attr10?: boolean | undefined;
   }>;
   unprocessed: { attr1: string; attr2: string; }[];
+  retryAttempts?: number;
 }>>(magnify(batchGetWithAttributesNoPreserve));
 
 const batchGetWithAttributesPreserve = entityWithSK.get([{attr1: 'abc', attr2: 'def'}]).go({ attributes: ['attr5', 'attr10'], preserveBatchOrder: true });
@@ -314,4 +317,5 @@ expectType<Promise<{
     attr10?: boolean | undefined;
   } | null>;
   unprocessed: { attr1: string; attr2: string; }[];
+  retryAttempts?: number;
 }>>(magnify(batchGetWithAttributesPreserve));
