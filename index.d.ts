@@ -2623,6 +2623,8 @@ interface GoBatchGetTerminalOptions<Attributes> {
   listeners?: Array<ElectroEventListener>;
   logger?: ElectroEventListener;
   consistent?: boolean;
+  autoretry?: number;
+  retryDelay?: number;
 }
 
 export type ExecutionOptionCompare = "keys" | "attributes" | "v2";
